@@ -22,33 +22,77 @@ Deno.serve(async (req) => {
   })
 
   // Single query: fetch all portfolios with their holdings in one round-trip
+  // Include currency so we can store it on the snapshot for historical accuracy
   const { data: portfolios, error: portError } = await supabase
     .from('portfolios')
-    .select('id, holdings(current_value)')
+    .select('id, currency, holdings(symbol, current_value, quantity, asset_type, metadata)')
 
   if (portError || !portfolios || portfolios.length === 0) {
     return new Response(JSON.stringify({ snapshots: 0 }), { headers: CORS })
   }
 
   const today = new Date().toISOString().split('T')[0]
-  const snapshots = portfolios.map((p: { id: string; holdings: { current_value: number }[] }) => ({
+
+  // ── Portfolio snapshots ────────────────────────────────────────────────────
+  // Stores equity (not gross value) to match the Dashboard Net Worth stat card.
+  // Real estate equity = current_value - mortgage_balance - heloc_balance.
+  type HoldingRow = {
+    symbol: string | null
+    current_value: number
+    quantity: number
+    asset_type: string
+    metadata: Record<string, unknown> | null
+  }
+
+  function holdingEquity(h: HoldingRow): number {
+    if (h.asset_type === 'real_estate') {
+      const mortgage = Number(h.metadata?.mortgage_balance ?? 0)
+      const heloc    = Number(h.metadata?.heloc_balance    ?? 0)
+      return (h.current_value ?? 0) - mortgage - heloc
+    }
+    return h.current_value ?? 0
+  }
+
+  const snapshots = portfolios.map((p: { id: string; currency: string; holdings: HoldingRow[] }) => ({
     portfolio_id: p.id,
     snapshot_date: today,
-    total_value: p.holdings.reduce((s, h) => s + (h.current_value ?? 0), 0),
+    total_value: p.holdings.reduce((s, h) => s + holdingEquity(h), 0),
+    currency: p.currency,
     breakdown: {},
   }))
 
-  // Upsert snapshots (one per portfolio per day)
-  const { error } = await supabase
+  const { error: snapError } = await supabase
     .from('portfolio_snapshots')
     .upsert(snapshots, { onConflict: 'portfolio_id,snapshot_date' })
 
-  if (error) {
-    return new Response(JSON.stringify({ error: error.message }), { status: 500, headers: CORS })
+  if (snapError) {
+    return new Response(JSON.stringify({ error: snapError.message }), { status: 500, headers: CORS })
+  }
+
+  // ── Stock price history — EOD closing price per symbol ────────────────────
+  // Collect unique symbols with a price (current_value / quantity = per-share price)
+  const priceMap = new Map<string, number>()
+  for (const portfolio of portfolios) {
+    for (const h of (portfolio as { holdings: { symbol: string | null; current_value: number; quantity: number; asset_type: string }[] }).holdings) {
+      if (h.symbol && h.quantity > 0 && !priceMap.has(h.symbol)) {
+        priceMap.set(h.symbol, h.current_value / h.quantity)
+      }
+    }
+  }
+
+  if (priceMap.size > 0) {
+    const priceRows = Array.from(priceMap.entries()).map(([symbol, price]) => ({
+      symbol,
+      price,
+      date: today,
+    }))
+    await supabase
+      .from('stock_price_history')
+      .upsert(priceRows, { onConflict: 'symbol,date' })
   }
 
   return new Response(
-    JSON.stringify({ snapshots: snapshots.length, date: today }),
+    JSON.stringify({ snapshots: snapshots.length, priceHistory: priceMap.size, date: today }),
     { headers: { ...CORS, 'Content-Type': 'application/json' } }
   )
 })

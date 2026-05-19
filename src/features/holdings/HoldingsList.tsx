@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { MoreHorizontal, Pencil, Trash2, Copy } from 'lucide-react'
+import { MoreHorizontal, Pencil, Trash2, Copy, ChevronUp, ChevronDown, ChevronsUpDown } from 'lucide-react'
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
@@ -14,6 +14,12 @@ import { useGrant } from '@/features/auth/GrantContext'
 import type { Holding } from '@/types/holding'
 import type { AssetTypeValue } from '@/lib/constants'
 
+// Asset types where quantity is not meaningful
+const HIDE_QUANTITY: AssetTypeValue[] = ['cash', 'real_estate', 'retirement_account', 'education_plan']
+
+type SortKey = 'name' | 'type' | 'qty' | 'cost' | 'value' | 'gainLoss'
+type SortDir = 'asc' | 'desc'
+
 interface Props {
   holdings: Holding[]
   currency: string
@@ -26,6 +32,17 @@ export default function HoldingsList({ holdings, currency, onEdit, onDuplicate, 
   const { isViewer } = useGrant()
   const [deleteTarget, setDeleteTarget] = useState<Holding | null>(null)
   const [deleting, setDeleting] = useState(false)
+  const [sortKey, setSortKey] = useState<SortKey>('name')
+  const [sortDir, setSortDir] = useState<SortDir>('asc')
+
+  function handleSort(key: SortKey) {
+    if (sortKey === key) {
+      setSortDir(d => d === 'asc' ? 'desc' : 'asc')
+    } else {
+      setSortKey(key)
+      setSortDir('asc')
+    }
+  }
 
   async function confirmDelete() {
     if (!deleteTarget) return
@@ -35,6 +52,19 @@ export default function HoldingsList({ holdings, currency, onEdit, onDuplicate, 
       setDeleteTarget(null)
     }
   }
+
+  const sorted = [...holdings].sort((a, b) => {
+    const dir = sortDir === 'asc' ? 1 : -1
+    switch (sortKey) {
+      case 'name':    return dir * a.name.localeCompare(b.name)
+      case 'type':    return dir * a.asset_type.localeCompare(b.asset_type)
+      case 'qty':     return dir * (a.quantity - b.quantity)
+      case 'cost':    return dir * (a.cost_basis - b.cost_basis)
+      case 'value':   return dir * (a.current_value - b.current_value)
+      case 'gainLoss': return dir * ((a.current_value - a.cost_basis) - (b.current_value - b.cost_basis))
+      default:        return 0
+    }
+  })
 
   if (holdings.length === 0) {
     return (
@@ -50,18 +80,20 @@ export default function HoldingsList({ holdings, currency, onEdit, onDuplicate, 
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b bg-muted/50">
-              <th className="px-4 py-3 text-left font-medium text-muted-foreground">Name</th>
-              <th className="px-4 py-3 text-left font-medium text-muted-foreground">Type</th>
-              <th className="px-4 py-3 text-right font-medium text-muted-foreground">Cost Basis</th>
-              <th className="px-4 py-3 text-right font-medium text-muted-foreground">Current Value</th>
-              <th className="px-4 py-3 text-right font-medium text-muted-foreground">Gain / Loss</th>
-              <th className="px-4 py-3 w-10" />
+              <SortTh label="Name"          col="name"     active={sortKey} dir={sortDir} onClick={handleSort} align="left" />
+              <SortTh label="Type"          col="type"     active={sortKey} dir={sortDir} onClick={handleSort} align="left" />
+              <SortTh label="Qty"           col="qty"      active={sortKey} dir={sortDir} onClick={handleSort} align="right" />
+              <SortTh label="Cost Basis"    col="cost"     active={sortKey} dir={sortDir} onClick={handleSort} align="right" />
+              <SortTh label="Current Value" col="value"    active={sortKey} dir={sortDir} onClick={handleSort} align="right" />
+              <SortTh label="Gain / Loss"   col="gainLoss" active={sortKey} dir={sortDir} onClick={handleSort} align="right" />
+              <th className="w-10 px-4 py-3" />
             </tr>
           </thead>
           <tbody className="divide-y">
-            {holdings.map(h => {
+            {sorted.map(h => {
               const gainLoss = h.current_value - h.cost_basis
               const gainLossPct = h.cost_basis > 0 ? (gainLoss / h.cost_basis) * 100 : 0
+              const showQty = !HIDE_QUANTITY.includes(h.asset_type as AssetTypeValue)
               return (
                 <tr key={h.id} className="hover:bg-muted/30 transition-colors">
                   <td className="px-4 py-3">
@@ -78,6 +110,9 @@ export default function HoldingsList({ holdings, currency, onEdit, onDuplicate, 
                   </td>
                   <td className="px-4 py-3">
                     <AssetTypeBadge type={h.asset_type as AssetTypeValue} />
+                  </td>
+                  <td className="px-4 py-3 text-right tabular-nums text-muted-foreground">
+                    {showQty ? formatQty(h.quantity, h.asset_type) : '—'}
                   </td>
                   <td className="px-4 py-3 text-right tabular-nums">
                     {formatCurrency(h.cost_basis, currency)}
@@ -154,6 +189,47 @@ export default function HoldingsList({ holdings, currency, onEdit, onDuplicate, 
       </AlertDialog>
     </>
   )
+}
+
+// ── Sortable header cell ──────────────────────────────────────────────────────
+
+function SortTh({ label, col, active, dir, onClick, align }: {
+  label: string
+  col: SortKey
+  active: SortKey
+  dir: SortDir
+  onClick: (col: SortKey) => void
+  align: 'left' | 'right'
+}) {
+  const isActive = active === col
+  return (
+    <th
+      className={`px-4 py-3 font-medium text-muted-foreground cursor-pointer select-none hover:text-foreground ${align === 'right' ? 'text-right' : 'text-left'}`}
+      onClick={() => onClick(col)}
+    >
+      <span className={`inline-flex items-center gap-1 ${align === 'right' ? 'flex-row-reverse' : ''}`}>
+        {label}
+        {isActive
+          ? dir === 'asc'
+            ? <ChevronUp className="h-3.5 w-3.5 text-primary" />
+            : <ChevronDown className="h-3.5 w-3.5 text-primary" />
+          : <ChevronsUpDown className="h-3.5 w-3.5 opacity-30" />
+        }
+      </span>
+    </th>
+  )
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function formatQty(qty: number, assetType: string): string {
+  // Crypto can have many decimal places; other types typically integer or 2–4dp
+  const decimals = assetType === 'crypto' ? 8 : 4
+  const formatted = qty.toLocaleString('en-US', {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: decimals,
+  })
+  return formatted
 }
 
 function relativeTime(iso: string): string {

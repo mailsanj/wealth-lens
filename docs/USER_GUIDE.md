@@ -13,8 +13,9 @@ WealthLens is a personal finance tracking and simulation platform. It lets you t
 5. [Holdings](#holdings)
 6. [Scenarios](#scenarios)
 7. [Goals](#goals)
-8. [Settings](#settings)
-9. [Shared Access (Viewer Mode)](#shared-access)
+8. [Alerts](#alerts)
+9. [Settings](#settings)
+10. [Shared Access (Viewer Mode)](#shared-access)
 
 ---
 
@@ -47,6 +48,7 @@ The sidebar on the left provides access to all main sections:
 | Portfolios | List of all portfolios; create and manage them |
 | Scenarios | Investment projection models |
 | Goals | Financial milestones and progress tracking |
+| Alerts | Configure threshold and movement alerts with email/SMS notifications |
 | Settings | Profile, preferences, and shared access |
 
 The bottom of the sidebar shows your logged-in email and a **Sign out** button.
@@ -80,9 +82,9 @@ A list of all portfolios showing individual values and their share of your total
 
 A line chart showing your net worth history. Each data point is a **snapshot** — a point-in-time record of your portfolio values.
 
-**Taking a Snapshot:** Click **Take Snapshot** in the top-right to record today's values. Snapshots are used to build the historical chart and to overlay your actual progress on Scenario projections.
+**Taking a Snapshot:** Click **Take Snapshot** in the top-right to record today's values. The button shows the **date and time** of the last snapshot taken (e.g. `May 10 at 4:31 PM`). Snapshots are used to build the historical chart and to overlay your actual progress on Scenario projections.
 
-> Snapshots are also taken automatically at market close each weekday (4:30 PM ET) once the price refresh cron job is running.
+> Snapshots are also taken automatically at market close each weekday (4:30 PM ET) once the cron jobs are running.
 
 ---
 
@@ -125,6 +127,21 @@ Clicking a portfolio card opens its detail page, which shows:
 
 **Export CSV / Export XLSX** — downloads all holdings in the selected format.
 
+### Holdings Table
+
+The holdings table shows the following columns:
+
+| Column | Notes |
+|--------|-------|
+| Name | Holding name and symbol. Symbol-linked holdings show an **auto** badge with time since last price refresh, or a **manual** badge if no symbol is set. |
+| Type | Asset type badge |
+| Qty | Quantity of shares, coins, or units. Shows `—` for asset types where quantity is not applicable (cash, real estate, retirement accounts, education plans). |
+| Cost Basis | Total amount originally paid |
+| Current Value | Current market value (with equity sub-label for real estate) |
+| Gain / Loss | Gross appreciation in value and percentage |
+
+**Click any column header** to sort the table by that column. Click again to reverse the sort direction. An arrow icon (↑ ↓) indicates the active sort column.
+
 ---
 
 ## Holdings
@@ -155,6 +172,12 @@ Click **Add Holding** on the Portfolio detail page. Fields vary by asset type:
 - **Purchase Date** — optional.
 
 Additional metadata fields appear for each asset type (e.g. exchange/sector for stocks, mortgage balance for real estate, account type for cash).
+
+### Lot-Based Tracking
+
+You can add multiple holdings with the same ticker symbol — for example, two separate AAPL purchases on different dates with different quantities and cost bases. Each is stored and displayed as an independent row. This is called **lot-based tracking** and allows precise cost basis tracking per purchase date, which is useful for tax purposes.
+
+When prices are refreshed, all rows with the same symbol receive the same per-share price, but their individual `current_value` values differ based on their respective quantities.
 
 ### Real Estate Equity
 
@@ -308,6 +331,56 @@ Each goal card shows:
 - **% complete** and **amount remaining**.
 - **Years away** from the target date.
 - **Projection status** — if linked to a scenario, shows whether the projection is on track (green) or off track (amber), and the projected year of reaching the target.
+
+---
+
+## Alerts
+
+The Alerts page lets you configure threshold-based notifications that fire when a stock or portfolio moves by a defined amount within a trading day.
+
+### Alert Types
+
+| Type | Target | How it works |
+|------|--------|-------------|
+| Individual Stock | Ticker symbol (e.g. `AAPL`) | Compares the current price from Twelve Data against the previous trading day's closing price |
+| Portfolio | A specific portfolio | Compares the current sum of all holding values against the most recent end-of-day portfolio snapshot |
+
+Both types are checked every 15 minutes during US market hours (9 AM – 4 PM ET, weekdays).
+
+### Creating an Alert
+
+Click **New Alert** → fill in:
+
+- **Label** — optional description (e.g. "AAPL crash guard")
+- **Alert Type** — Individual Stock or Portfolio
+- **Target** — ticker symbol (for stock) or portfolio dropdown
+- **Direction** — Goes Down / Goes Up / Either Direction
+- **By** — % Percent or $ Dollars
+- **Threshold** — the amount that triggers the alert (e.g. 5 for 5%, or 1000 for $1,000)
+- **Notification Channels** — Email and/or SMS (both can be enabled simultaneously)
+  - Email defaults to your login email; you can change it per alert
+  - Phone number must be in international format (e.g. `+14155552671`)
+- **Re-alert after** — cooldown before the same alert can fire again (e.g. 24 Hours)
+
+Click **Create Alert** to save.
+
+### Managing Alerts
+
+Each alert card shows the condition, notification channels, cooldown, and last triggered time.
+
+**Hover actions** (reveal on hover):
+- **Pencil** — edit the alert
+- **Copy** — duplicate the alert (saved as inactive)
+- **Trash** — delete permanently
+
+**Bell icon** — toggle the alert on or off without deleting it. A filled bell (🔔) means active; a crossed bell means paused.
+
+### How Notifications Are Sent
+
+- **Email** — sent via Resend from `WealthLens <onboarding@resend.dev>`. Can be moved to a custom domain in future.
+- **SMS** — sent via Twilio. During the Twilio trial, SMS can only be sent to phone numbers that have been verified in the Twilio Console.
+
+> **Note:** Stock alerts require at least one day of price history before they can fire. After the first end-of-day cron run following deployment, the baseline is established and alerts become active.
 
 ---
 

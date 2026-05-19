@@ -27,6 +27,16 @@ export function formatDate(dateString: string): string {
   }).format(new Date(dateString))
 }
 
+export function formatDateTime(isoString: string): string {
+  return new Intl.DateTimeFormat('en-US', {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  }).format(new Date(isoString))
+}
+
 export function formatGainLoss(value: number, currency = 'USD'): string {
   const formatted = formatCurrency(Math.abs(value), currency)
   return value >= 0 ? `+${formatted}` : `-${formatted}`

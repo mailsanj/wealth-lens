@@ -32,7 +32,9 @@ This document covers the architecture, technical decisions, coding standards, an
 | Drag & drop | @dnd-kit | Separate contexts per column; `verticalListSortingStrategy` for panels, `rectSortingStrategy` for portfolio cards |
 | Backend / Database | Supabase (PostgreSQL) | Row Level Security enforced; untyped client (see [Key Decisions](#key-technical-decisions)) |
 | Auth | Supabase Auth | Email/password only |
-| Edge Functions | Supabase Edge Functions (Deno) | Price refresh + EOD snapshot |
+| Edge Functions | Supabase Edge Functions (Deno) | Price refresh + EOD snapshot + alert checks |
+| Email notifications | Resend API | Free tier: 3,000 emails/month |
+| SMS notifications | Twilio | Pay-per-SMS; `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER` |
 | Price data | Twelve Data API | US equities + crypto; 8 symbols/minute free tier |
 | Currency conversion | open.er-api.com + Frankfurter fallback | 4-hour localStorage cache; 8-second timeout |
 | Excel export | SheetJS (`xlsx`) | Write-only usage; parser CVE does not apply |
@@ -59,16 +61,17 @@ src/
     scenarios/       # ScenarioConfigPanel, ScenarioEventList, FutureContributionsList,
     |                  YearRateOverrideList, HoldingSourcePicker, ScenarioForm
     settings/        # ProfileForm, PreferencesForm, PermissionsPanel
-  hooks/             # All data-fetching hooks (one per domain)
+  hooks/             # All data-fetching hooks (one per domain), incl. useAlerts
   lib/               # Utilities: simulation, currency, export, formatters, permissions
-  pages/             # Route-level page components (one per route)
+  pages/             # Route-level page components (one per route), incl. Alerts.tsx
   types/             # TypeScript interfaces (holding.ts, scenario.ts, portfolio.ts)
 
 supabase/
-  migrations/        # Numbered SQL migrations (001–011)
+  migrations/        # Numbered SQL migrations (001–012)
   functions/
     refresh-prices/         # Edge Function: batch price fetch from Twelve Data
-    market-close-snapshot/  # Edge Function: EOD portfolio snapshot
+    market-close-snapshot/  # Edge Function: EOD portfolio snapshot + stock_price_history write
+    check-alerts/           # Edge Function: evaluate alert rules, send Resend email + Twilio SMS
 
 docs/                # User Guide + Developer Guide
 ```
@@ -97,11 +100,13 @@ Browser
 Supabase
   ├─ Auth                    → email/password
   ├─ PostgreSQL + RLS        → per-user + grantee data isolation
-  ├─ Edge Functions (Deno)   → price refresh, EOD snapshot
+  ├─ Edge Functions (Deno)   → price refresh, EOD snapshot, alert checks
   └─ pg_cron + pg_net        → scheduled Edge Function invocations
 
 External
   ├─ Twelve Data API         → stock/ETF/crypto prices
+  ├─ Resend API              → email notifications
+  ├─ Twilio API              → SMS notifications
   ├─ open.er-api.com         → currency exchange rates
   └─ Frankfurter (fallback)  → exchange rates backup
 ```
@@ -125,7 +130,7 @@ External
 | `profiles` | User display name, currency, date format. PK = `auth.users.id` (column name: `id`, not `user_id`) |
 | `portfolios` | Portfolio metadata. Has `user_id`, `sort_order`, `is_active` |
 | `holdings` | Individual assets. Has `symbol`, `last_price_updated_at` for auto-refresh |
-| `portfolio_snapshots` | Point-in-time portfolio values for net worth chart. Unique on `(portfolio_id, snapshot_date)` |
+| `portfolio_snapshots` | Point-in-time **equity** values per portfolio. `portfolio_id` is nullable (SET NULL on portfolio deletion — preserves history). Has `currency` column stored at save time. Unique on `(portfolio_id, snapshot_date)` |
 | `scenarios` | Scenario metadata. Has `user_id` |
 | `scenario_configs` | One row per scenario. All simulation parameters |
 | `scenario_events` | One-off events (contribution/withdrawal/shock/rebalance). Has `linked_sources` JSONB |
@@ -133,6 +138,8 @@ External
 | `scenario_year_rate_overrides` | Per-year or per-range growth/inflation overrides |
 | `goals` | Financial targets linked to portfolios and/or scenarios |
 | `access_grants` | Read-only page grants from owner to grantee (viewer mode) |
+| `alert_rules` | User-configured alert conditions. Has `alert_type`, `direction`, `amount_type`, cooldown fields, `last_triggered_at` |
+| `stock_price_history` | EOD closing price per symbol per day. Written by `market-close-snapshot`. Unique on `(symbol, date)`. Used as the previous-close baseline for stock alert checks |
 
 ### JSONB Columns
 
@@ -157,6 +164,8 @@ Migrations are numbered sequentially in `supabase/migrations/`:
 | `009_price_refresh.sql` | `last_price_updated_at` on holdings, enables `pg_cron` + `pg_net` |
 | `010_service_role_grants.sql` | Explicit GRANTs to `service_role` for Edge Function access |
 | `011_access_grants.sql` | `access_grants` table, trigger, grantee RLS policies |
+| `012_alerts.sql` | `alert_rules` + `stock_price_history` tables, RLS, service_role grants |
+| `013_snapshot_currency.sql` | `portfolio_snapshots`: adds `currency` column, changes FK from `CASCADE → SET NULL` (preserves history on portfolio deletion), backfills currency from current portfolio rows |
 
 ### RLS Approach
 
@@ -255,7 +264,19 @@ All data hooks (`usePortfolios`, `useNetWorth`, `useScenarios`, `useGoals`) use 
 - 4-hour localStorage cache keyed by base currency
 - `convert(amount, from, to, rates)` — returns amount unchanged if rates are unavailable
 
-### 8. Page Constants for Granted Access
+### 8. Portfolio Snapshots — Equity, Currency, and Deletion Safety
+
+Three design decisions govern `portfolio_snapshots`:
+
+**Store equity, not gross value.** `total_value` stores equity (real estate deducts `mortgage_balance + heloc_balance`) so the Net Worth Over Time chart matches the Dashboard stat card exactly. Both the manual "Take Snapshot" button (`useSnapshots.takeSnapshot`) and the EOD cron (`market-close-snapshot`) apply the same equity computation as `computeEffectiveValue()` in `src/lib/holdings.ts`.
+
+**Store currency at save time.** The `currency` column is written when the snapshot is taken and never updated. This makes the chart aggregation self-contained — it converts using `snapshot.currency` rather than looking up the live portfolio, so deleted portfolios still contribute correctly to historical totals.
+
+**SET NULL on portfolio deletion.** The FK changed from `ON DELETE CASCADE` (migration 013) to `ON DELETE SET NULL`. Deleting a portfolio no longer wipes its history — `portfolio_id` becomes NULL, but the row and its `total_value`/`currency` are preserved. The chart query filters by active `portfolioIds`, so orphaned rows are excluded from the live view but remain in the database for potential future analysis.
+
+> **Pre-migration-013 snapshots** stored gross value without currency. These can be deleted manually via the Supabase SQL Editor or — once built — via the Snapshot Management UI in the backlog.
+
+### 9. Page Constants for Granted Access
 
 `src/lib/permissions.ts` defines `GRANTABLE_PAGES` as a `const` array. Adding a new page to the permission system requires only adding one entry here. Existing grants default to **No Access** for any new page added — they must be explicitly re-granted.
 
@@ -300,7 +321,7 @@ All data hooks (`usePortfolios`, `useNetWorth`, `useScenarios`, `useGoals`) use 
 
 ## Supabase Edge Functions
 
-Two Edge Functions live in `supabase/functions/`:
+Three Edge Functions live in `supabase/functions/`:
 
 ### `refresh-prices`
 
@@ -311,7 +332,7 @@ Fetches latest prices from Twelve Data and updates `holdings.current_value`.
 - Caps at 8 symbols per call (Twelve Data free tier: 8 credits/minute).
 - Batch-upserts all updated holdings in a single round-trip.
 - Crypto symbols are appended with `/USD` (e.g. `BTC` → `BTC/USD`) before the API call.
-- Supports `?debug=true` query param to return full intermediate state.
+- Debug mode removed for security — the function previously exposed cross-user portfolio composition via `?debug=true`.
 
 **Deployment:**
 ```bash
@@ -322,16 +343,36 @@ npx supabase functions deploy refresh-prices --no-verify-jwt
 
 ### `market-close-snapshot`
 
-Takes an end-of-day portfolio snapshot for all portfolios.
+Takes an end-of-day portfolio snapshot for all portfolios, and records the closing price per symbol.
 
 **Key behaviours:**
 - Does NOT call `refresh-prices` — relies on the 15-minute cron having kept prices current.
-- Fetches all portfolios with their holdings in a single JOIN query (`portfolios.select('id, holdings(current_value)')`).
+- Fetches all portfolios with their holdings in a single JOIN query.
 - Upserts into `portfolio_snapshots` with `onConflict: 'portfolio_id,snapshot_date'` — safe to run multiple times per day.
+- **Also writes to `stock_price_history`** — derives closing price as `current_value / quantity` for each symbol, upserted with `onConflict: 'symbol,date'`. This provides the previous-close baseline for `check-alerts`.
 
 **Deployment:**
 ```bash
 npx supabase functions deploy market-close-snapshot --no-verify-jwt
+```
+
+### `check-alerts`
+
+Evaluates all active alert rules and fires Resend email and/or Twilio SMS notifications when thresholds are crossed.
+
+**Key behaviours:**
+- Fetches all active `alert_rules` across all users via service role.
+- **Stock alerts:** fetches current prices from Twelve Data (up to 8 symbols, same rotation cap); compares against the most recent `stock_price_history` entry within the past 5 days (to handle weekends/holidays).
+- **Portfolio alerts:** sums `holdings.current_value` for the monitored portfolio; compares against the most recent `portfolio_snapshots` entry before today.
+- Respects per-alert cooldown (`cooldown_value` + `cooldown_unit`); skips if `last_triggered_at + cooldown > now()`.
+- Updates `last_triggered_at` after each successful trigger.
+- Runs 7 minutes after `refresh-prices` each cycle (`7-59/15`) to avoid Twelve Data rate limit collisions.
+
+**Required secrets:** `RESEND_API_KEY`, `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER`
+
+**Deployment:**
+```bash
+npx supabase functions deploy check-alerts --no-verify-jwt
 ```
 
 ### CORS Headers
@@ -354,8 +395,11 @@ Set up via `pg_cron` + `pg_net` in the Supabase SQL Editor (see `supabase/setup_
 
 | Job | Schedule | UTC time | ET equivalent |
 |-----|----------|----------|---------------|
-| `wealthlens-refresh-prices` | `*/15 14-21 * * 1-5` | Every 15 min, 14:00–21:00 UTC, weekdays | 9 AM–4 PM ET (covers EST and EDT) |
+| `wealthlens-refresh-prices` | `*/15 14-21 * * 1-5` | Every 15 min, 14:00–21:00 UTC, weekdays | 9 AM–4 PM ET |
+| `wealthlens-check-alerts` | `7-59/15 14-21 * * 1-5` | Every 15 min offset by 7 min, weekdays | Runs at :07, :22, :37, :52 past each hour |
 | `wealthlens-market-close-snapshot` | `30 21 * * 1-5` | 21:30 UTC, weekdays | 4:30 PM EST / 5:30 PM EDT |
+
+The 7-minute offset on `check-alerts` prevents it from making Twelve Data API calls in the same minute as `refresh-prices`, avoiding rate limit collisions on the free tier.
 
 ---
 
@@ -434,6 +478,23 @@ Year-rate overrides are applied deterministically (no randomisation) even in Mon
 - **Rate limit:** 8 API credits/minute on free tier (1 credit per symbol in a batch request).
 - **Key storage:** Supabase Edge Function secret `TWELVE_DATA_API_KEY`.
 
+### Resend (Email Notifications)
+
+- **Endpoint:** `POST https://api.resend.com/emails`
+- **Auth:** `Authorization: Bearer <RESEND_API_KEY>`
+- **From address:** `WealthLens <onboarding@resend.dev>` (free Resend sender; swap for custom domain when ready)
+- **Free tier:** 3,000 emails/month, 100/day
+- **Key storage:** Supabase Edge Function secret `RESEND_API_KEY`
+
+### Twilio (SMS Notifications)
+
+- **Endpoint:** `POST https://api.twilio.com/2010-04-01/Accounts/{SID}/Messages.json`
+- **Auth:** HTTP Basic (`TWILIO_ACCOUNT_SID:TWILIO_AUTH_TOKEN` base64-encoded)
+- **Body format:** `application/x-www-form-urlencoded` with `To`, `From`, `Body` fields
+- **Phone format:** E.164 international format (e.g. `+14155552671`)
+- **Trial limitation:** On the free trial, SMS can only be sent to numbers verified in the Twilio Console
+- **Key storage:** Supabase Edge Function secrets `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER`
+
 ### Exchange Rates
 
 - **Primary:** `https://open.er-api.com/v6/latest/${base}` — free, no key required, reliable.
@@ -480,7 +541,7 @@ These are hard-won lessons from building WealthLens. Each caused at least one de
 
 | Feature | Complexity | Notes |
 |---------|-----------|-------|
-| **Alerts & Notifications** | Medium | Trigger-based alerts via Resend/SendGrid or Twilio. Needs `alert_rules` table. Price-based alerts require live data (already in place). |
+| **Scenario Drift Alerts** | Medium | Alert when actual portfolio diverges from scenario projection by X%. Deferred to a future phase; `alert_rules` table already designed to accommodate new `alert_type` values. |
 | **Portfolio Sell-Off / Drawdown** | Medium | Model withdrawals funded by specific portfolio liquidation (sequential or proportional). Remaining from Phase 5; `scenario_configs.portfolio_id` FK is the starting point. |
 | **Tax Reporting** | High | Cost basis per lot, realized gain/loss, tax-year summaries. Requires new `transactions` table — major schema addition. |
 | **Mobile App** | High | React Native / Expo reusing the same Supabase backend. Hook/API layer is designed to support this. Build after web is stable. |
@@ -491,3 +552,5 @@ These are hard-won lessons from building WealthLens. Each caused at least one de
 - **Adding new grantable pages** — Add one entry to `GRANTABLE_PAGES` in `src/lib/permissions.ts`. Existing grants default to No Access for new pages automatically.
 - **Real-time prices** — The 15-minute cron + batch rotation pattern handles any portfolio size within the free API tier. Upgrade to a paid Twelve Data plan to remove the 8-symbol/minute constraint.
 - **XLSX export additional sheets** — `exportScenarioXlsx` in `src/lib/exportXlsx.ts` accepts pre-computed results. Add new sheets by extending the function; the `appendPercentileSummary` helper can be reused.
+- **Alerts — adding new alert types** — add a new value to the `alert_type` check constraint in `012_alerts.sql` and a new evaluation branch in `check-alerts/index.ts`. The notification dispatch (Resend + Twilio) and cooldown logic are shared and need no changes.
+- **Alerts — custom email domain** — change the `from` field in `check-alerts/index.ts` from `onboarding@resend.dev` to `alerts@yourdomain.com`. Requires domain verification in the Resend dashboard.

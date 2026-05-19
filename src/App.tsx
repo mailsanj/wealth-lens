@@ -11,6 +11,7 @@ import Scenarios from '@/pages/Scenarios'
 import ScenarioDetail from '@/pages/ScenarioDetail'
 import ScenarioCompare from '@/pages/ScenarioCompare'
 import Goals from '@/pages/Goals'
+import Alerts from '@/pages/Alerts'
 import Settings from '@/pages/Settings'
 import Login from '@/pages/auth/Login'
 import Register from '@/pages/auth/Register'
@@ -54,6 +55,8 @@ export default function App() {
               <Route path="/goals" element={
                 <GrantGuard page="goals"><Goals /></GrantGuard>
               } />
+              {/* Alerts — owner only, not grantable */}
+              <Route path="/alerts" element={<Alerts />} />
               {/* Settings — always accessible to all authenticated users */}
               <Route path="/settings" element={<Settings />} />
             </Route>

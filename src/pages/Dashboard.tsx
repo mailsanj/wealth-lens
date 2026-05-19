@@ -12,15 +12,19 @@ import NetWorthSummary from '@/features/dashboard/NetWorthSummary'
 import PortfolioBreakdown from '@/features/dashboard/PortfolioBreakdown'
 import AllocationChart from '@/components/charts/AllocationChart'
 import NetWorthChart from '@/components/charts/NetWorthChart'
-import { formatDate } from '@/lib/formatters'
+import { formatDateTime } from '@/lib/formatters'
 
 export default function Dashboard() {
   const { isViewer } = useGrant()
   const { profile } = useProfile()
   const { portfolioStats, portfolioIds, byAssetType, loading } = useNetWorth()
-  const { chartData, lastSnapshotDate, taking, takeSnapshot } = useSnapshots(portfolioIds)
   const currency = profile?.currency ?? 'USD'
   const { rates, loading: ratesLoading, error: ratesError } = useExchangeRates(currency)
+
+  const { chartData, lastSnapshotAt, taking, takeSnapshot } = useSnapshots(
+    portfolioIds,
+    Object.keys(rates).length > 0 ? { rates, baseCurrency: currency } : undefined
+  )
 
   // Convert each portfolio's value to the user's base currency, then aggregate
   const converted = useMemo(() => {
@@ -53,8 +57,8 @@ export default function Dashboard() {
             {profile?.display_name ? `Welcome back, ${profile.display_name}` : 'Dashboard'}
           </h1>
           <p className="mt-0.5 text-sm text-muted-foreground">
-            {lastSnapshotDate
-              ? `Last snapshot: ${formatDate(lastSnapshotDate)}`
+            {lastSnapshotAt
+              ? `Last snapshot: ${formatDateTime(lastSnapshotAt)}`
               : 'No snapshots yet — take one to start tracking history'}
           </p>
         </div>

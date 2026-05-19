@@ -95,23 +95,18 @@ Deno.serve(async (req) => {
     }
   }
 
-  const isDebug = new URL(req.url).searchParams.get('debug') === 'true'
-  const debug: Record<string, unknown> = {}
-
   // Equity batch fetch (stocks, ETFs, mutual funds, bonds)
   if (equityHoldings.length > 0) {
     const uniqueSymbols = [...new Set(equityHoldings.map(h => h.symbol as string))]
-    debug.equitySymbols = uniqueSymbols
     try {
       const symbolParam = uniqueSymbols.map(s => encodeURIComponent(s)).join(',')
       const res = await fetch(
         `https://api.twelvedata.com/price?symbol=${symbolParam}&apikey=${TWELVE_DATA_KEY}`
       )
       const data = await res.json() as Record<string, unknown>
-      debug.equityResponse = data
       parsePrices(data, uniqueSymbols[0], false)
-    } catch (e) {
-      debug.equityError = String(e)
+    } catch (_e) {
+      // Partial failure — continue with crypto
     }
   }
 
@@ -119,21 +114,17 @@ Deno.serve(async (req) => {
   if (cryptoHoldings.length > 0) {
     const uniqueSymbols = [...new Set(cryptoHoldings.map(h => h.symbol as string))]
     const pairs = uniqueSymbols.map(s => `${s}/USD`)
-    debug.cryptoSymbols = uniqueSymbols
     try {
       const symbolParam = pairs.map(s => encodeURIComponent(s)).join(',')
       const res = await fetch(
         `https://api.twelvedata.com/price?symbol=${symbolParam}&apikey=${TWELVE_DATA_KEY}`
       )
       const data = await res.json() as Record<string, unknown>
-      debug.cryptoResponse = data
       parsePrices(data, pairs[0], true)
-    } catch (e) {
-      debug.cryptoError = String(e)
+    } catch (_e) {
+      // Partial failure — continue
     }
   }
-
-  debug.priceMapEntries = Object.fromEntries(priceMap)
 
   const now = new Date().toISOString()
   const updateErrors: string[] = []
@@ -155,12 +146,7 @@ Deno.serve(async (req) => {
   const updated = upsertError ? 0 : upsertRows.length
 
   return new Response(
-    JSON.stringify({
-      updated,
-      total: holdings.length,
-      timestamp: now,
-      ...(isDebug && { debug, updateErrors }),
-    }),
+    JSON.stringify({ updated, total: holdings.length, timestamp: now }),
     { headers: { ...CORS, 'Content-Type': 'application/json' } }
   )
 })

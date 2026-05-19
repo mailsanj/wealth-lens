@@ -75,7 +75,8 @@ create policy "Grantees read owner profile"
     )
   );
 
--- portfolios: readable with any page grant (dashboard needs totals, scenarios needs overlay)
+-- portfolios: readable with dashboard, portfolios, scenarios, or goals grant
+-- (dashboard needs totals, scenarios needs overlay, goals needs linked portfolio values)
 create policy "Grantees read portfolios"
   on public.portfolios for select
   using (
@@ -83,6 +84,12 @@ create policy "Grantees read portfolios"
       select 1 from public.access_grants ag
       where ag.owner_id  = portfolios.user_id
         and ag.grantee_id = auth.uid()
+        and (
+          'dashboard'  = any(ag.pages) or
+          'portfolios' = any(ag.pages) or
+          'scenarios'  = any(ag.pages) or
+          'goals'      = any(ag.pages)
+        )
     )
   );
 

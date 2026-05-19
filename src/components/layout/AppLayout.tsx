@@ -1,6 +1,6 @@
 import { NavLink, Outlet } from 'react-router-dom'
 import {
-  LayoutDashboard, Briefcase, TrendingUp, Target, Settings, LogOut, Eye,
+  LayoutDashboard, Briefcase, TrendingUp, Target, Bell, Settings, LogOut, Eye,
 } from 'lucide-react'
 import { useAuth } from '@/features/auth/AuthContext'
 import { useGrant } from '@/features/auth/GrantContext'
@@ -14,6 +14,7 @@ const ALL_NAV = [
   { to: '/portfolios', label: 'Portfolios', icon: Briefcase,        page: 'portfolios' },
   { to: '/scenarios',  label: 'Scenarios',  icon: TrendingUp,       page: 'scenarios'  },
   { to: '/goals',      label: 'Goals',      icon: Target,           page: 'goals'      },
+  { to: '/alerts',     label: 'Alerts',     icon: Bell,             page: null         },
   { to: '/settings',   label: 'Settings',   icon: Settings,         page: null         },
 ]
 
